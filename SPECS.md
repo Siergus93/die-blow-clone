@@ -50,8 +50,9 @@ All numeric values below are the actual constants from the source.
 |---|---|
 | `W` `A` `S` `D` | Move up / left / down / right |
 | **Left click (hold)** | Move toward the cursor (click-to-move) |
-| **Right click** | Cast Fireball toward the cursor |
-| `1` | Cast Fireball toward the cursor |
+| **Right click** | Cast the **selected active skill** toward the cursor (§5.1) |
+| `1` `2` `3` `4` | Select Fireball / Blink / Frost Nova / Chain Lightning |
+| **Left click on a skill slot** | Select that skill (bottom-left HUD icons) |
 | `SPACE` | Melee swing (aims toward the cursor) |
 | `ESC` | Toggle pause (during a run only) |
 | `R` / `Enter` / `SPACE` / **left click** | Start a new run (summary screen only) |
@@ -60,10 +61,15 @@ Rules and edge cases:
 - **WASD has absolute priority.** If any WASD key is held, click-to-move is ignored
   entirely for that frame, even while the left button is held.
 - Diagonal WASD input is normalised — diagonal speed equals cardinal speed.
-- **Left click never attacks.** It is movement-only.
-- Right-click is cast-on-press (not on-hold). Browser context menu is suppressed on
-  the canvas. `1` uses OS key-repeat, so *holding* `1` auto-casts whenever the
-  fireball comes off cooldown.
+- **Left click never attacks** unless it lands on a skill slot (then it is a selection,
+  not a movement click). Otherwise it is movement-only.
+- The loadout is a **single active slot**: exactly one of the four skills is selected at
+  a time, and right-click always casts the selected one. Fireball is no longer bound
+  directly to right-click.
+- Right-click is cast-on-press (not on-hold); the cast is ignored while the selected
+  skill is cooling down. Browser context menu is suppressed on the canvas.
+- Skill selection uses number keys on `keydown` (OS key-repeat is harmless — it only
+  re-selects the same slot). Selection is **preserved across runs**; cooldowns are not.
 - **Melee is press-only**: `SPACE` swings on keydown and ignores OS key-repeat, so
   holding `Space` does not chain swings — you must tap it. `Space` also calls
   `preventDefault()` so the page does not scroll.
@@ -85,16 +91,16 @@ Rules and edge cases:
 | Still running | Rendering. The scene and HUD are redrawn every paused frame from frozen state, then the overlay is drawn last. `dt` is recomputed from a fresh timestamp, so nothing "catches up" on resume. |
 
 While paused:
-- Movement keys (`WASD`), fireball casts (`1`, right-click) and click-to-move are
-  ignored. `tryCastFireball()` returns early, the mouse-down handler returns early, and
-  the keydown handler drops any key other than `ESC`.
+- Movement keys (`WASD`), skill casts (right-click), skill selection (`1`–`4`) and
+  click-to-move are ignored. `tryCastSelectedSkill()` returns early, the mouse-down
+  handler returns early, and the keydown handler drops any key other than `ESC`.
 - Key state is still tracked (keys pressed *before* pausing stay "held" until released,
   so the player does not keep running after resuming).
 - **The pause overlay** dims the screen with `rgba(6,6,10,0.72)` and shows:
   - `PAUSED` (bold 54 px)
   - `Press ESC to resume` (grey 15 px)
-  - A control recap: WASD/left-click move, `SPACE` melee, right-click or `1`
-    fireball, ESC pause
+  - A control recap: WASD/left-click move, `SPACE` melee, `1`–`4` select a skill,
+    right-click cast, ESC pause
   - A status line: `Wave n · Kills n · Lv n · HP x/y · m:ss`
 
 The overlay dims the already-rendered frame, so the HUD and world remain faintly visible
@@ -160,7 +166,7 @@ There are three ways the player regains HP; all are passive (no potions yet):
 - Healing is skipped entirely while the player is dead (including the level-up heal).
 - Any damage source resets the regen clock.
 
-### Experience & leveling
+### 3.1 Experience & leveling
 
 **Earning XP**
 - XP is awarded by `damageEnemy()` in the kill branch, so only **real kills** grant XP.
@@ -187,22 +193,24 @@ over).
 **Rewards per level (automatic, no choices)**
 - **+10 max HP** (then a full heal via `healPlayer(1)`, capped at the new max)
 - **+2 melee damage** — melee base becomes `32 + (level − 1) × 2`
-- **+2 fireball damage** — projectile damage becomes `40 + (level − 1) × 2`
+- **+2 skill damage** — fireball becomes `40 + (level − 1) × 2`, Frost Nova
+  `20 + (level − 1) × 2` and Chain Lightning `45 + (level − 1) × 2`
 - Level-up feedback: gold **"LEVEL UP!"** screen banner, a `Lv n` popup at the player,
   and 24 gold particles.
 
-At level 5: 140 HP, 40 melee, 48 fireball.
+At level 5: 140 HP, 40 melee, 48 fireball, 28 Frost Nova, 53 Chain Lightning.
 
-### Combo (kill chain)
+### 3.2 Combo (kill chain)
 
 - Every kill adds **1 combo** and refreshes the chain window to **5 s**. If 5 s pass
   without a kill, the combo (and its bonus) resets to 0.
 - Combo **level** = `min(10, floor(combo / 5))` — every **5 kills** grants a level.
-  Each level adds **+6% melee and fireball damage**, up to **+60%** at level 10
+  Each level adds **+6% melee and skill damage**, up to **+60%** at level 10
   (50 kills in one chain).
 - The multiplier is `1 + 0.06 × level` and applies when damage is resolved: melee
-  before its ×0.85–1.15 roll and crit, fireball when it explodes. Multi-kills from one
-  swing or explosion use the multiplier from before that attack.
+  before its ×0.85–1.15 roll and crit, fireball when it explodes, and Frost Nova /
+  Chain Lightning per target when they resolve. Multi-kills from one swing, explosion,
+  nova or chain use the multiplier from before that attack.
 - The window only counts down while `playing`; pausing freezes it. Death immediately
   resets the chain, and every new run starts at 0.
 - Feedback: the meter pops on every kill; each new level shows a gold `COMBO LV n`
@@ -220,7 +228,7 @@ Melee is a manually triggered swing bound to `SPACE`.
   paused, while dead, and while the melee cooldown is still running (a press during
   the cooldown is simply lost — there is no buffering).
 - A successful swing resolves in the player's facing, which always points at the
-  cursor (§3) — so melee aims with the mouse, like the fireball. There is no
+  cursor (§3.1) — so melee aims with the mouse, like the fireball. There is no
   auto-swing and no auto-aim toward nearby enemies.
 
 **Swing**
@@ -229,7 +237,7 @@ Melee is a manually triggered swing bound to `SPACE`.
 | Cooldown | **0.45 s** |
 | Range | **82 px** (centre-to-centre check against `range + enemy.radius`) |
 | Arc | **0.8π ≈ 144°** cone centred on facing |
-| Base damage | **32 + 2 per level above 1**, × combo multiplier (§3), randomised ×0.85 … ×1.15 |
+| Base damage | **32 + 2 per level above 1**, × combo multiplier (§3.2), randomised ×0.85 … ×1.15 |
 | Critical chance | **15%** → ×2 damage |
 | Swing animation | 0.16 s white arc drawn at 0.75 × range, expanding across the cone |
 | Screen shake | 3 (takes the max; never reduces an existing larger shake) |
@@ -238,7 +246,70 @@ Multiple enemies inside the cone are **all hit** by a single swing (cleave).
 
 ---
 
-## 5. Fireball
+## 5. Active Skills
+
+The player carries a **loadout of four active skills** and a **single active slot**:
+exactly one skill is selected, and right-click casts it toward the cursor. `1`–`4` (or a
+left click on the corresponding HUD slot) changes the selection.
+
+| Slot | Skill | Cooldown | Role |
+|---|---|---|---|
+| `1` | Fireball | 1.3 s | Ranged projectile + AoE |
+| `2` | Blink | 5 s | Cursor-directed teleport + brief i-frames |
+| `3` | Frost Nova | 8 s | Point-blank AoE damage + slow |
+| `4` | Chain Lightning | 7 s | Multi-target instant chain |
+
+All four share the same cast rule: `tryCastSelectedSkill()` runs on right-click, is
+ignored while `state !== playing`, while `player.dead`, or while the selected skill's
+cooldown is still running (a press during cooldown is lost — there is no buffering).
+
+### 5.1 Skill reference
+
+**Fireball** — the ranged default (full detail below in §5.2).
+
+**Blink** (`BLINK = { distance: 140, cooldown: 5, invuln: 0.15 }`)
+
+| Property | Value |
+|---|---|
+| Teleport distance | **140 px** toward the cursor |
+| Invulnerability | **0.15 s** on arrival (`player.invuln`) |
+| Cooldown | **5 s** |
+| Damage | none |
+| Landing | clamped to `[r, world − r]` on both axes, and can move through enemies |
+
+Blink has no collision check: it always moves the configured distance in the cursor
+direction (then clamps at the world edge), including *into* or *through* enemy bodies.
+
+**Frost Nova** (`NOVA = { damage: 20, radius: 140, cooldown: 8, slow: 0.4, slowDuration: 2.5 }`)
+
+| Property | Value |
+|---|---|
+| Area | **140 px** radius around the player (`+ enemy.radius` in the hit test) |
+| Damage | **20 + 2 per level above 1**, × combo multiplier, ×0.9…1.1, crit 15% → ×2 |
+| Slow | **40% move-speed reduction for 2.5 s** on every enemy hit |
+| Cooldown | **8 s** |
+
+The slow refreshes (takes the max of the remaining and new duration) on each hit; it
+scales movement only — attack cooldowns, arrows and damage are unaffected. Slowed
+enemies draw a pale-blue ring.
+
+**Chain Lightning** (`CHAIN = { damage: 45, range: 240, jumpRange: 180, maxTargets: 5, cooldown: 7, falloff: 0.85 }`)
+
+| Property | Value |
+|---|---|
+| First target | the **nearest living enemy to the cursor** within **240 px** of the player |
+| Jumps | to the nearest un-hit enemy within **180 px** of the current target |
+| Max targets | **5** |
+| Damage | `(45 + 2 per level) × combo × 0.85^jump × 0.9…1.1`, crit 15% → ×2 |
+| Cooldown | **7 s** |
+| Range check | evaluated on the target list **before** any damage is applied |
+
+The chain resolves instantly (targets are collected, then damaged in order). A cast with
+no enemy in range shows a grey `NO TARGET` popup and **does not** start the cooldown.
+The lightning shape is cosmetic jitter only; every jump is a straight target-to-target
+link drawn for 0.22 s.
+
+### 5.2 Fireball (full detail)
 
 | Property | Value |
 |---|---|
@@ -247,7 +318,7 @@ Multiple enemies inside the cone are **all hit** by a single swing (cleave).
 | Projectile hit radius | 9 px |
 | Spawn offset | 20 px in front of the player |
 | Lifetime | **1.6 s** (≈ 860 px of travel) |
-| Direct/AoE damage | **40 + 2 per level above 1** base, × combo multiplier (§3) at explosion |
+| Direct/AoE damage | **40 + 2 per level above 1** base, × combo multiplier (§3.2) at explosion |
 | Explosion radius | **72 px** |
 | Critical chance | 15% → ×2 |
 
@@ -258,13 +329,16 @@ Multiple enemies inside the cone are **all hit** by a single swing (cleave).
 - Explosion damage applies once to every living enemy within `72 + enemy.radius`,
   with linear falloff:
   `falloff = clamp(1 - d / (72 + enemy.radius) + 0.4, 0.4, 1)` — i.e. **40% damage at
-  the edge, 100% at the centre** — then × combo multiplier (§3), ×0.9…×1.1 random
+  the edge, 100% at the centre** — then × combo multiplier (§3.2), ×0.9…×1.1 random
   spread, then ×2 on crit.
 - Explosion VFX: 22 orange + 10 bright-yellow particles, screen shake 6.
 
 **Quirks**
 - A fireball that expires by lifetime or leaves the world **vanishes silently** — it
   only explodes on enemy contact. There is no ground/obstacle collision.
+- Fireballs already in flight still resolve if the player dies: they belong to no one,
+  but `explodeFireball()` can still kill enemies **in the same frame** as the death
+  (see §12 quirk 8).
 
 ---
 
@@ -285,7 +359,7 @@ On spawn, with `wave` = current wave number:
 - `maxHp = round(baseHp × (1 + wave × 0.13))`
 - `damage = round(baseDamage × (1 + wave × 0.08))`
 - `speed = baseSpeed × random(0.9 … 1.1)`
-- `xp = round(baseXp × (1 + (wave − 1) × 0.15))` (see §3)
+- `xp = round(baseXp × (1 + (wave − 1) × 0.15))` (see §3.1)
 - Initial attack cooldown is randomised in `[0, type cooldown)` so a spawned group
   does not strike in unison.
 
@@ -301,9 +375,13 @@ Enemies always know exactly where the player is.
   advances if farther, retreats if closer — and fires an arrow whenever
   `distance < 300` and its cooldown is ready.
   - Arrow: speed **330 px/s**, hit radius 5, lifetime 2.5 s, damage = enemy damage.
-- **Hit-stun:** taking damage from any source (melee or fireball) sets a **0.15 s**
-  stun. While stunned, the enemy cannot move, attack, bob, or recover its attack
-  cooldown; it still flashes white. Repeated hits refresh the stun.
+- **Hit-stun:** taking damage from any source (melee, fireball, Frost Nova or Chain
+  Lightning) sets a **0.15 s** stun. While stunned, the enemy cannot move, attack, bob,
+  or recover its attack cooldown; it still flashes white. Repeated hits refresh the stun.
+- **Frost slow:** Frost Nova sets `e.slow` to **2.5 s**; while it is positive, all
+  movement uses **60% of the enemy's speed**. The timer ticks during the normal enemy
+  update, so a stunned enemy keeps its remaining slow time but cannot move until the
+  stun ends.
 - **Player dead / summary open:** all enemy updates are skipped, so enemies freeze
   completely — movement, attacks, cooldowns and wobble.
 - **Separation:** each enemy is nudged away from every other enemy closer than
@@ -316,6 +394,7 @@ Enemies always know exactly where the player is.
 - Body is a flat circle; a walk **wobble** (`sin(t × 6) × 2`) offsets it slightly.
 - Two **eyes** are drawn offset toward the player, so enemies visibly "look at" you.
 - A **white flash** lasts 0.12 s on taking damage.
+- A pale-blue **frost ring** is drawn around any enemy under a Frost Nova slow.
 - A red HP bar (2.2 × radius wide, 5 px tall) appears **above** the enemy only once
   it is below full health.
 - On death: 16 blood particles + a **corpse decal** left on the floor.
@@ -333,7 +412,7 @@ Enemies always know exactly where the player is.
 | Spawn interval | `max(0.45, 2.2 − wave × 0.14)` s |
 | Enemies per spawn tick | Base `1 + floor(wave / 3)`, **+10%** `SPAWN_COUNT_MULT` (fractional bonus spawns carry to later ticks) |
 | Wave start | `wave = 1` when a run starts; a gold "WAVE n" banner flashes on screen when a wave begins |
-| Wave-clear reward | Clearing a wave **fully heals the player** (see §3) |
+| Wave-clear reward | Clearing a wave **fully heals the player** (see §3.1) |
 
 **Wave flow (two phases)**
 1. **Spawn phase** — `waveTimer` counts up from 0 to 25 s and enemies spawn on the
@@ -377,7 +456,7 @@ Approximate mix at wave ≥ 3: 65% zombie / 22% skeleton / 13% imp.
 - Floating numbers: crits are **orange `#ffab3d` at 20 px**, normal hits **white at
   14 px**; they rise at 34 px/s and fade over 1.0 s.
 - Killing an enemy (HP ≤ 0 in `damageEnemy`) increments the **kill counter**, registers
-  a **combo kill** (§3), awards its **XP** (see §3), emits a larger blood burst, and
+  a **combo kill** (§3.2), awards its **XP** (see §3.1), emits a larger blood burst, and
   drops a corpse decal. Dead enemies are removed from the array at the end of the enemy
   update pass.
 
@@ -434,14 +513,15 @@ All HUD elements are drawn in screen space, unaffected by camera shake.
 | Wave label | top-right | `Wave n`, bold 16 px |
 | Kill counter | top-right, below | `Kills: n`, 13 px grey |
 | Wave progress bar | top-right | 120 × 4 px; gold fill over the 25 s spawn phase, green + full once cleared, with `Clear the remaining: n` underneath (§7) |
-| Combo meter | right side, vertically centred | Appears at combo ≥ 1: kill count, `LV n · +x% DMG`, 5 s window bar and seconds left; hidden at 0; pops on each kill — see §3 |
-| Fireball slot | bottom-left (34, H−40) | 40 px circle with label `1 / RMB` |
+| Combo meter | right side, vertically centred | Appears at combo ≥ 1: kill count, `LV n · +x% DMG`, 5 s window bar and seconds left; hidden at 0; pops on each kill — see §3.2 |
+| Skill slots | bottom-left row | Four 44 px circles from (40, H−48), 56 px apart, in slot order Fireball/Blink/Frost Nova/Chain Lightning; each shows an icon, its `1`–`4` badge, a radial cooldown sweep with a `s.d` countdown while recharging, and a gold double ring when selected; `RMB · <name>` is labelled above the row and `1–4 select` below |
 | Summary overlay | full screen | Immediately on death: `YOU DIED`, run stats, `NEW BEST` tags, all-time best, restart prompt; waits for input — see §8.3/§8.4 |
 | Title overlay | full screen | On load: name, controls, best run, start prompt; the HUD is hidden — see §2.2 |
 | Pause overlay | full screen | Replaces the frame only while paused — see §2.1 |
 
-The fireball slot shows a **radial cooldown sweep** while recharging and a glowing
-orange orb when ready.
+Skill icons are dimmed to 40% opacity while their skill is recharging and drawn at full
+opacity when ready. Left-clicking inside a slot's circle selects it (the click does not
+also start click-to-move).
 
 ---
 
@@ -453,8 +533,13 @@ orange orb when ready.
   with `× 0.05^dt` (very strong drag), alpha fades linearly with remaining life.
 - **Floating text** (`addText`): 1 s life; world-space text drifts up, screen-space
   text (wave banner) stays fixed.
-- **Screen shake** sources: melee swing 3, fireball explosion 6, player hurt 5.
-  Applied as a per-frame random translate of the world layer only.
+- **Screen shake** sources: melee swing 3, fireball explosion 6, Blink 2, Frost Nova 4,
+  Chain Lightning 3, player hurt 5. Applied as a per-frame random translate of the world
+  layer only.
+- **Spell FX** (`spellFx`) are short-lived world-space shapes drawn between projectiles
+  and particles: a Blink trail (dashed cyan line, 0.28 s), a Frost Nova ring (expanding
+  cyan circle, 0.4 s) and Chain Lightning links (jittered polylines with a glow pass,
+  0.22 s). They are cosmetic and updated/filtered with the other FX.
 
 **Draw order per frame**
 1. `ctx.save()` + shake translate
@@ -462,9 +547,10 @@ orange orb when ready.
 3. Actors, depth-sorted by **Y coordinate** (painter's algorithm): shadows, bodies,
    eyes, HP bars
 4. Projectiles (fireballs as a 3-stop radial gradient glow; arrows as 10 px lines)
-5. Particles, then floating damage text
-6. `ctx.restore()`
-7. `drawHud()` in screen space
+5. Spell FX: Blink trail, Frost Nova ring, Chain Lightning links
+6. Particles, then floating damage text
+7. `ctx.restore()`
+8. `drawHud()` in screen space
 
 Off-screen culling is applied to decor, corpses, enemies and (implicitly) actors
 outside a 40–60 px margin.
@@ -478,8 +564,12 @@ Player      hp 100 · speed 240 · radius 16 · regen 3/s after 5s · full heal 
 Level       1 start · +10 max hp & +2 melee/+2 fireball dmg per level · full heal on level-up
 XP          zombie 8 · skeleton 10 · imp 6 · ×(1 + (wave−1)×0.15) · needed = round(25 × lvl^1.6)
 Melee       Space (press only, aims at cursor) · dmg 32 +2/level (×0.85–1.15) · cd 0.45 · range 82 · arc 144° · crit 15% ×2
+Skills      1–4 select · right-click casts the selected one · selection kept across runs
 Fireball    dmg 40 +2/level · cd 1.3 · speed 540 · hit r 9 · aoe 72 · life 1.6s · crit 15% ×2
-Combo       1 per kill · 5s window · level = floor(kills/5) max 10 · +6% melee/fireball dmg per level (max +60%)
+Blink       140 px toward cursor · 0.15s i-frames · cd 5 · no damage
+Frost Nova  140 px radius · dmg 20 +2/level · 40% slow for 2.5s · cd 8 · crit 15% ×2
+Chain       45 +2/level · first target nearest to cursor within 240 px · jumps 180 px · max 5 · ×0.85 per jump · cd 7 · 15% ×2
+Combo       1 per kill · 5s window · level = floor(kills/5) max 10 · +6% melee/fireball/nova/chain dmg per level (max +60%)
 Zombie      hp 70  · speed 85  · dmg 12 · reach 46  · cd 1.0
 Skeleton    hp 45  · speed 78  · dmg 10 · reach 300 · cd 1.9 · arrow 330 px/s
 Imp         hp 30  · speed 168 · dmg 7  · reach 38  · cd 0.6
@@ -501,9 +591,10 @@ Documented honestly; none are gameplay-breaking.
    (centre-to-centre with a full radius bonus). Since the auto-swing trigger was
    removed (§4), this is now the only range check — but it is still measured
    centre-to-centre, so a swing can connect slightly beyond its stated 82 px reach.
-2. Fireballs do not explode on expiry or on leaving the world (§5).
-3. Holding `1` (or `S`/`D`/`W`/`A` key-repeat) relies on OS key repeat, which varies by
-   platform. Melee deliberately does *not* repeat — holding `SPACE` never chains swings.
+2. Fireballs do not explode on expiry or on leaving the world (§5.2).
+3. Holding `S`/`D`/`W`/`A` (or a number key) relies on OS key repeat, which varies by
+   platform — repeated number keys only re-select the same slot, so this is harmless.
+   Melee deliberately does *not* repeat — holding `SPACE` never chains swings.
 4. Enemy separation is an O(n²) nested loop; fine at current enemy counts, would need
    spatial hashing at high counts.
 5. Spawn placement can put enemies on-screen when the camera is pinned to a world edge
@@ -516,6 +607,14 @@ Documented honestly; none are gameplay-breaking.
    finishes updating projectiles, so an in-flight fireball can explode and add kills/XP
    after the run was recorded. Those late kills do not change the recorded summary, and
    they cannot rebuild the combo.
+9. Chain Lightning rolls its crit and damage **per target**, so a 5-target chain has
+   five independent 15% crit chances; a bad roll on the first target does not stop the
+   chain.
+10. Chain Lightning's first-target search is cursor-relative but capped at 240 px from
+    the **player**. With the cursor beyond that ring, the chain snaps to the nearest
+    in-range enemy, which can feel like it ignored the aim.
+11. Blink can teleport *into* an enemy's body (there is no collision) and briefly
+    overlaps the target's melee range before its cooldown buys an escape.
 
 ---
 
@@ -523,9 +622,10 @@ Documented honestly; none are gameplay-breaking.
 
 Anything not listed in this document does not exist yet. Planned work — with goals,
 technical notes, acceptance criteria and open decisions — lives in
-[`ROADMAP.md`](ROADMAP.md). M0 (foundations & run loop) and M0.1 (combo meter) are
-shipped. Remaining order: M1 loot & equipment, M2 build choices, M3 elites/bosses &
-obstacles, M4 floors, M5 audio & settings, M6 meta/classes (parked).
+[`ROADMAP.md`](ROADMAP.md). M0 (foundations & run loop), M0.1 (combo meter) and M0.2
+(active skills & loadout) are shipped. Remaining order: M1 loot & equipment, M2 build
+choices, M3 elites/bosses & obstacles, M4 floors, M5 audio & settings, M6 meta/classes
+(parked).
 
 ---
 

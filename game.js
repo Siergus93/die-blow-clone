@@ -2,7 +2,8 @@
 
 /* ============================================================
    Die Blow — a tiny click-to-move ARPG
-   WASD / Left click: move · Space: melee (aims at cursor) · Right click or 1: fireball
+   WASD / Left click: move · Space: melee (aims at cursor)
+   1–4: select active skill · Right click: cast selected skill
    Mechanics reference: SPECS.md
    ============================================================ */
 
@@ -59,10 +60,18 @@ let best = loadBest();
 // ---------- input ----------
 const mouse = { x: W / 2, y: H / 2, left: false, right: false };
 
-canvas.addEventListener("mousemove", (e) => {
+function canvasPoint(e) {
   const r = canvas.getBoundingClientRect();
-  mouse.x = ((e.clientX - r.left) / r.width) * W;
-  mouse.y = ((e.clientY - r.top) / r.height) * H;
+  return {
+    x: ((e.clientX - r.left) / r.width) * W,
+    y: ((e.clientY - r.top) / r.height) * H,
+  };
+}
+
+canvas.addEventListener("mousemove", (e) => {
+  const p = canvasPoint(e);
+  mouse.x = p.x;
+  mouse.y = p.y;
 });
 canvas.addEventListener("mousedown", (e) => {
   if (state === STATE.TITLE || state === STATE.SUMMARY) {
@@ -70,10 +79,19 @@ canvas.addEventListener("mousedown", (e) => {
     return;
   }
   if (state !== STATE.PLAYING) return;
-  if (e.button === 0) mouse.left = true;
+  const p = canvasPoint(e);
+  if (e.button === 0) {
+    const slot = skillSlotIndexAt(p.x, p.y);
+    if (slot >= 0) {
+      selectedSkill = SKILL_ORDER[slot];
+      mouse.left = false;
+      return;
+    }
+    mouse.left = true;
+  }
   if (e.button === 2) {
     mouse.right = true;
-    tryCastFireball();
+    tryCastSelectedSkill();
   }
 });
 window.addEventListener("mouseup", (e) => {
@@ -106,7 +124,11 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (state !== STATE.PLAYING) return;
-  if (e.key === "1") tryCastFireball();
+  if (e.key >= "1" && e.key <= "4") {
+    const slot = Number(e.key) - 1;
+    if (SKILL_ORDER[slot]) selectedSkill = SKILL_ORDER[slot];
+    return;
+  }
   if (e.key === " ") {
     e.preventDefault(); // stop the page from scrolling
     if (!e.repeat) tryMelee();
@@ -150,11 +172,24 @@ const player = {
   lastHurt: -99,
   meleeCd: 0,
   meleeAnim: 0, // remaining swing-arc visual time
-  fireCd: 0,
+  invuln: 0, // Blink i-frames
+  skillCd: { fireball: 0, blink: 0, nova: 0, chain: 0 },
 };
 
 const MELEE = { damage: 32, range: 82, cooldown: 0.45, arc: Math.PI * 0.8 };
 const FIREBALL = { damage: 40, speed: 540, radius: 9, cooldown: 1.3, aoe: 72 };
+const BLINK = { distance: 140, cooldown: 5, invuln: 0.15 };
+const NOVA = { damage: 20, radius: 140, cooldown: 8, slow: 0.4, slowDuration: 2.5 };
+const CHAIN = { damage: 45, range: 240, jumpRange: 180, maxTargets: 5, cooldown: 7, falloff: 0.85 };
+
+const SKILLS = {
+  fireball: { name: "Fireball", cooldown: FIREBALL.cooldown },
+  blink: { name: "Blink", cooldown: BLINK.cooldown },
+  nova: { name: "Frost Nova", cooldown: NOVA.cooldown },
+  chain: { name: "Chain Lightning", cooldown: CHAIN.cooldown },
+};
+const SKILL_ORDER = ["fireball", "blink", "nova", "chain"];
+let selectedSkill = "fireball";
 
 // ---------- combo ----------
 const COMBO = { window: 5, killsPerLevel: 5, maxLevel: 10, damagePerLevel: 0.06 };
@@ -213,6 +248,7 @@ const ENEMY_TYPES = {
 let enemies = [];
 let projectiles = [];
 let particles = [];
+let spellFx = [];
 let damageTexts = [];
 let corpses = []; // static decals, capped
 
@@ -242,6 +278,7 @@ function spawnEnemy(typeKey, wave) {
     attackCd: rand(0, t.cooldown),
     flash: 0,
     stun: 0,
+    slow: 0,
     wobble: rand(0, Math.PI * 2),
   });
 }
@@ -375,9 +412,8 @@ function tryMelee() {
   meleeAttack();
 }
 
-function tryCastFireball() {
-  if (state !== STATE.PLAYING || player.dead || player.fireCd > 0) return;
-  player.fireCd = FIREBALL.cooldown;
+function castFireball() {
+  player.skillCd.fireball = FIREBALL.cooldown;
   const m = toWorld(mouse.x, mouse.y);
   const ang = Math.atan2(m.y - player.y, m.x - player.x);
   projectiles.push({
@@ -391,6 +427,123 @@ function tryCastFireball() {
     damage: FIREBALL.damage + (player.level - 1) * 2,
     life: 1.6,
   });
+}
+
+function castBlink() {
+  player.skillCd.blink = BLINK.cooldown;
+  const m = toWorld(mouse.x, mouse.y);
+  const ang = Math.atan2(m.y - player.y, m.x - player.x);
+  const fromX = player.x;
+  const fromY = player.y;
+  player.x = clamp(player.x + Math.cos(ang) * BLINK.distance, player.r, WORLD.w - player.r);
+  player.y = clamp(player.y + Math.sin(ang) * BLINK.distance, player.r, WORLD.h - player.r);
+  player.invuln = Math.max(player.invuln, BLINK.invuln);
+
+  addParticles(fromX, fromY, "#78d8ff", 16, 220, 0.5);
+  addParticles(player.x, player.y, "#c9f3ff", 12, 170, 0.4);
+  spellFx.push({ kind: "blink", x1: fromX, y1: fromY, x2: player.x, y2: player.y, life: 0.28, maxLife: 0.28 });
+  camera.shake = Math.max(camera.shake, 2);
+}
+
+function castFrostNova() {
+  player.skillCd.nova = NOVA.cooldown;
+  spellFx.push({ kind: "nova", x: player.x, y: player.y, r: NOVA.radius, life: 0.4, maxLife: 0.4 });
+  addParticles(player.x, player.y, "#9fe8ff", 26, 260, 0.7);
+  addParticles(player.x, player.y, "#e8fbff", 12, 150, 0.5);
+  camera.shake = Math.max(camera.shake, 4);
+
+  const mult = comboMultiplier();
+  for (const e of enemies) {
+    if (e.hp <= 0) continue;
+    if (dist(player.x, player.y, e.x, e.y) > NOVA.radius + e.r) continue;
+    e.slow = Math.max(e.slow, NOVA.slowDuration);
+    const crit = Math.random() < 0.15;
+    const base = NOVA.damage + (player.level - 1) * 2;
+    damageEnemy(e, Math.round(base * mult * rand(0.9, 1.1) * (crit ? 2 : 1)), crit);
+  }
+}
+
+function lightningSegment(ax, ay, bx, by) {
+  const points = [{ x: ax, y: ay }];
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.hypot(dx, dy) || 1;
+  const px = -dy / len;
+  const py = dx / len;
+  for (let i = 1; i <= 3; i++) {
+    const t = i / 4;
+    const jitter = rand(-9, 9);
+    points.push({ x: ax + dx * t + px * jitter, y: ay + dy * t + py * jitter });
+  }
+  points.push({ x: bx, y: by });
+  return points;
+}
+
+function castChainLightning() {
+  const cursor = toWorld(mouse.x, mouse.y);
+  let first = null;
+  let best = Infinity;
+  for (const e of enemies) {
+    if (e.hp <= 0) continue;
+    if (dist(player.x, player.y, e.x, e.y) > CHAIN.range) continue;
+    const d = dist(cursor.x, cursor.y, e.x, e.y);
+    if (d < best) {
+      best = d;
+      first = e;
+    }
+  }
+  if (!first) {
+    addText(player.x, player.y - 44, "NO TARGET", "#8a8a92", 14);
+    return;
+  }
+
+  player.skillCd.chain = CHAIN.cooldown;
+  const targets = [];
+  const hit = new Set();
+  let current = first;
+  while (current && targets.length < CHAIN.maxTargets) {
+    targets.push(current);
+    hit.add(current);
+    let next = null;
+    let nearest = CHAIN.jumpRange;
+    for (const e of enemies) {
+      if (e.hp <= 0 || hit.has(e)) continue;
+      const d = dist(current.x, current.y, e.x, e.y);
+      if (d < nearest) {
+        nearest = d;
+        next = e;
+      }
+    }
+    current = next;
+  }
+
+  const segments = [];
+  let prev = { x: player.x, y: player.y };
+  for (const t of targets) {
+    segments.push(lightningSegment(prev.x, prev.y, t.x, t.y));
+    prev = t;
+  }
+  spellFx.push({ kind: "chain", segments, life: 0.22, maxLife: 0.22 });
+  camera.shake = Math.max(camera.shake, 3);
+
+  const mult = comboMultiplier();
+  for (let i = 0; i < targets.length; i++) {
+    const e = targets[i];
+    const crit = Math.random() < 0.15;
+    const base = CHAIN.damage + (player.level - 1) * 2;
+    const damage = base * mult * Math.pow(CHAIN.falloff, i) * rand(0.9, 1.1) * (crit ? 2 : 1);
+    addParticles(e.x, e.y, "#ffe66d", 5, 170, 0.4);
+    damageEnemy(e, Math.round(damage), crit);
+  }
+}
+
+function tryCastSelectedSkill() {
+  if (state !== STATE.PLAYING || player.dead) return;
+  if (player.skillCd[selectedSkill] > 0) return;
+  if (selectedSkill === "fireball") castFireball();
+  else if (selectedSkill === "blink") castBlink();
+  else if (selectedSkill === "nova") castFrostNova();
+  else if (selectedSkill === "chain") castChainLightning();
 }
 
 function explodeFireball(p) {
@@ -410,7 +563,7 @@ function explodeFireball(p) {
 }
 
 function hurtPlayer(dmg) {
-  if (player.dead) return;
+  if (player.dead || player.invuln > 0) return;
   player.hp -= dmg;
   player.lastHurt = elapsed;
   camera.shake = Math.max(camera.shake, 5);
@@ -447,6 +600,7 @@ function restartGame() {
   enemies = [];
   projectiles = [];
   particles = [];
+  spellFx = [];
   damageTexts = [];
   corpses = [];
   kills = 0;
@@ -473,7 +627,8 @@ function restartGame() {
   player.lastHurt = -99;
   player.meleeCd = 0;
   player.meleeAnim = 0;
-  player.fireCd = 0;
+  player.invuln = 0;
+  for (const key of SKILL_ORDER) player.skillCd[key] = 0;
 
   camera.shake = 0;
   snapCamera();
@@ -518,8 +673,9 @@ let elapsed = 0;
 
 function updatePlayer(dt) {
   player.meleeCd = Math.max(0, player.meleeCd - dt);
-  player.fireCd = Math.max(0, player.fireCd - dt);
   player.meleeAnim = Math.max(0, player.meleeAnim - dt);
+  player.invuln = Math.max(0, player.invuln - dt);
+  for (const key of SKILL_ORDER) player.skillCd[key] = Math.max(0, player.skillCd[key] - dt);
 
   if (player.dead) return;
 
@@ -560,6 +716,7 @@ function updateEnemies(dt) {
     if (e.hp <= 0) continue;
     const t = ENEMY_TYPES[e.type];
     e.flash = Math.max(0, e.flash - dt);
+    e.slow = Math.max(0, e.slow - dt);
 
     // hit-stun: freeze movement, attacks, cooldown recovery and bobbing
     if (e.stun > 0) {
@@ -571,14 +728,15 @@ function updateEnemies(dt) {
 
     const d = dist(e.x, e.y, player.x, player.y);
     const ang = Math.atan2(player.y - e.y, player.x - e.x);
+    const moveSpeed = e.speed * (e.slow > 0 ? 1 - NOVA.slow : 1);
 
     if (player.dead) continue;
 
     if (t.ranged) {
       // keep distance and shoot arrows
       const desired = 260;
-      if (d > desired + 40) { e.x += Math.cos(ang) * e.speed * dt; e.y += Math.sin(ang) * e.speed * dt; }
-      else if (d < desired - 40) { e.x -= Math.cos(ang) * e.speed * dt; e.y -= Math.sin(ang) * e.speed * dt; }
+      if (d > desired + 40) { e.x += Math.cos(ang) * moveSpeed * dt; e.y += Math.sin(ang) * moveSpeed * dt; }
+      else if (d < desired - 40) { e.x -= Math.cos(ang) * moveSpeed * dt; e.y -= Math.sin(ang) * moveSpeed * dt; }
       if (e.attackCd <= 0 && d < t.range) {
         e.attackCd = t.cooldown;
         projectiles.push({
@@ -590,7 +748,7 @@ function updateEnemies(dt) {
       }
     } else {
       // walk up and melee
-      if (d > t.range) { e.x += Math.cos(ang) * e.speed * dt; e.y += Math.sin(ang) * e.speed * dt; }
+      if (d > t.range) { e.x += Math.cos(ang) * moveSpeed * dt; e.y += Math.sin(ang) * moveSpeed * dt; }
       else if (e.attackCd <= 0) {
         e.attackCd = t.cooldown;
         hurtPlayer(e.damage);
@@ -642,6 +800,9 @@ function updateProjectiles(dt) {
 }
 
 function updateFx(dt) {
+  for (const f of spellFx) f.life -= dt;
+  spellFx = spellFx.filter((f) => f.life > 0);
+
   for (const p of particles) {
     p.x += p.vx * dt;
     p.y += p.vy * dt;
@@ -753,6 +914,15 @@ function drawEnemy(e) {
   ctx.arc(sx, sy + wob * 0.3, e.r, 0, Math.PI * 2);
   ctx.fill();
 
+  // frost slow ring
+  if (e.slow > 0) {
+    ctx.strokeStyle = "rgba(159,232,255,0.8)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(sx, sy + wob * 0.3, e.r + 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
   // eyes
   const ang = Math.atan2(player.y - e.y, player.x - e.x);
   const ex = Math.cos(ang) * e.r * 0.4, ey = Math.sin(ang) * e.r * 0.4;
@@ -786,6 +956,15 @@ function drawPlayer() {
   ctx.strokeStyle = "#8fc0ee";
   ctx.lineWidth = 2;
   ctx.stroke();
+
+  // Blink i-frame shield
+  if (player.invuln > 0) {
+    ctx.strokeStyle = "rgba(120,216,255,0.85)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, player.r + 6, 0, Math.PI * 2);
+    ctx.stroke();
+  }
 
   // facing indicator
   ctx.fillStyle = "#cfe6fa";
@@ -825,6 +1004,54 @@ function drawProjectiles() {
       ctx.lineTo(sx, sy);
       ctx.stroke();
     }
+  }
+}
+
+function drawSpellFx() {
+  for (const f of spellFx) {
+    const a = clamp(f.life / f.maxLife, 0, 1);
+    ctx.save();
+
+    if (f.kind === "nova") {
+      const progress = 1 - a;
+      const radius = f.r * (0.7 + progress * 0.3);
+      ctx.strokeStyle = `rgba(159,232,255,${0.85 * a})`;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(f.x - camera.x, f.y - camera.y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(232,251,255,${0.5 * a})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(f.x - camera.x, f.y - camera.y, radius * 0.82, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (f.kind === "blink") {
+      ctx.strokeStyle = `rgba(120,216,255,${0.7 * a})`;
+      ctx.lineWidth = 3;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.moveTo(f.x1 - camera.x, f.y1 - camera.y);
+      ctx.lineTo(f.x2 - camera.x, f.y2 - camera.y);
+      ctx.stroke();
+    } else if (f.kind === "chain") {
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      for (const segment of f.segments) {
+        ctx.beginPath();
+        ctx.moveTo(segment[0].x - camera.x, segment[0].y - camera.y);
+        for (let i = 1; i < segment.length; i++) {
+          ctx.lineTo(segment[i].x - camera.x, segment[i].y - camera.y);
+        }
+        ctx.strokeStyle = `rgba(255,224,80,${0.25 * a})`;
+        ctx.lineWidth = 8;
+        ctx.stroke();
+        ctx.strokeStyle = `rgba(255,248,190,${a})`;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
   }
 }
 
@@ -902,6 +1129,149 @@ function drawComboHud() {
   ctx.restore();
 }
 
+const SKILL_SLOT = { x: 40, y: H - 48, r: 22, gap: 56 };
+
+function skillSlotPosition(index) {
+  return { x: SKILL_SLOT.x + index * SKILL_SLOT.gap, y: SKILL_SLOT.y, r: SKILL_SLOT.r };
+}
+
+function skillSlotIndexAt(x, y) {
+  for (let i = 0; i < SKILL_ORDER.length; i++) {
+    const p = skillSlotPosition(i);
+    if (dist(x, y, p.x, p.y) <= p.r + 2) return i;
+  }
+  return -1;
+}
+
+function drawSkillIcon(key, x, y) {
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (key === "fireball") {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, 13);
+    g.addColorStop(0, "#ffe9a8");
+    g.addColorStop(0.55, "#ff9a2e");
+    g.addColorStop(1, "#ff5a12");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(x, y, 12, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (key === "blink") {
+    ctx.strokeStyle = "#78d8ff";
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(x - 9, y + 9);
+    ctx.lineTo(x + 7, y - 7);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x - 1, y - 8);
+    ctx.lineTo(x + 8, y - 8);
+    ctx.lineTo(x + 8, y + 1);
+    ctx.stroke();
+  } else if (key === "nova") {
+    ctx.strokeStyle = "#c9f3ff";
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 3; i++) {
+      const a = i * Math.PI / 3;
+      ctx.beginPath();
+      ctx.moveTo(x - Math.cos(a) * 11, y - Math.sin(a) * 11);
+      ctx.lineTo(x + Math.cos(a) * 11, y + Math.sin(a) * 11);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = "#78d8ff";
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (key === "chain") {
+    ctx.strokeStyle = "#ffe66d";
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(x - 9, y - 8);
+    ctx.lineTo(x - 2, y - 1);
+    ctx.lineTo(x - 7, y + 1);
+    ctx.lineTo(x + 2, y + 7);
+    ctx.lineTo(x + 9, y + 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawSkillHud() {
+  const total = (SKILL_ORDER.length - 1) * SKILL_SLOT.gap;
+  const centerX = SKILL_SLOT.x + total / 2;
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#9a9aa2";
+  ctx.font = "11px 'Segoe UI', sans-serif";
+  ctx.fillText(`RMB · ${SKILLS[selectedSkill].name}`, centerX, SKILL_SLOT.y - SKILL_SLOT.r - 13);
+
+  for (let i = 0; i < SKILL_ORDER.length; i++) {
+    const key = SKILL_ORDER[i];
+    const p = skillSlotPosition(i);
+    const max = SKILLS[key].cooldown;
+    const cd = player.skillCd[key];
+    const ready = cd <= 0;
+    const selected = key === selectedSkill;
+
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = ready ? 1 : 0.4;
+    drawSkillIcon(key, p.x, p.y);
+    ctx.globalAlpha = 1;
+
+    if (!ready) {
+      ctx.fillStyle = "rgba(0,0,0,0.58)";
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.arc(p.x, p.y, p.r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * clamp(cd / max, 0, 1));
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#e6e6ea";
+      ctx.font = "bold 11px 'Segoe UI', sans-serif";
+      ctx.fillText(cd.toFixed(1), p.x, p.y + 4);
+    }
+
+    if (selected) {
+      ctx.strokeStyle = "rgba(224,179,74,0.3)";
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r + 3, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = "#e0b34a";
+      ctx.lineWidth = 2.5;
+    } else {
+      ctx.strokeStyle = "#6a6a72";
+      ctx.lineWidth = 1;
+    }
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // slot number badge
+    const bx = p.x + p.r * 0.72;
+    const by = p.y - p.r * 0.72;
+    ctx.fillStyle = "#0c0c12";
+    ctx.beginPath();
+    ctx.arc(bx, by, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = selected ? "#e0b34a" : "#6a6a72";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = selected ? "#ffd76e" : "#b0b0b8";
+    ctx.font = "bold 9px 'Segoe UI', sans-serif";
+    ctx.fillText(`${i + 1}`, bx, by + 3);
+    ctx.restore();
+  }
+
+  ctx.fillStyle = "#5c5c64";
+  ctx.font = "10px 'Segoe UI', sans-serif";
+  ctx.fillText("1–4 select", centerX, SKILL_SLOT.y + SKILL_SLOT.r + 16);
+  ctx.textAlign = "left";
+}
+
 function drawHud() {
   // HP bar
   const bx = 20, by = 20, bw = 260, bh = 22;
@@ -955,37 +1325,7 @@ function drawHud() {
   ctx.fillRect(W - 140, 60, 120 * Math.min(1, waveTimer / WAVE_LENGTH), 4);
 
   drawComboHud();
-
-  // fireball cooldown
-  const fx = 34, fy = H - 40;
-  ctx.fillStyle = "rgba(0,0,0,0.65)";
-  ctx.beginPath();
-  ctx.arc(fx, fy, 20, 0, Math.PI * 2);
-  ctx.fill();
-  const ready = player.fireCd <= 0;
-  if (!ready) {
-    ctx.fillStyle = "rgba(255,154,46,0.25)";
-    ctx.beginPath();
-    ctx.arc(fx, fy, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - player.fireCd / FIREBALL.cooldown));
-    ctx.lineTo(fx, fy);
-    ctx.fill();
-  } else {
-    const g = ctx.createRadialGradient(fx, fy, 0, fx, fy, 14);
-    g.addColorStop(0, "#ffe9a8");
-    g.addColorStop(1, "#ff7a1e");
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(fx, fy, 12, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.strokeStyle = "#6a6a72";
-  ctx.beginPath();
-  ctx.arc(fx, fy, 20, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = "#9a9aa2";
-  ctx.font = "11px 'Segoe UI', sans-serif";
-  ctx.textAlign = "center";
-  ctx.fillText("1 / RMB", fx, fy + 34);
+  drawSkillHud();
 }
 
 // ---------- pause ----------
@@ -1014,7 +1354,8 @@ function drawPauseOverlay() {
   const lines = [
     "WASD / Left click — move",
     "Space — melee swing (aims at cursor)",
-    "Right click or 1 — fireball",
+    "1–4 — select active skill · Right click — cast it",
+    "Fireball · Blink · Frost Nova · Chain Lightning",
     "ESC — pause / resume",
   ];
   ctx.font = "14px 'Segoe UI', sans-serif";
@@ -1046,7 +1387,8 @@ function drawTitleOverlay() {
   const lines = [
     "WASD / Left click — move",
     "Space — melee swing (aims at cursor)",
-    "Right click or 1 — fireball",
+    "1–4 — select active skill · Right click — cast it",
+    "Fireball · Blink · Frost Nova · Chain Lightning",
     "ESC — pause",
   ];
   ctx.font = "14px 'Segoe UI', sans-serif";
@@ -1057,17 +1399,17 @@ function drawTitleOverlay() {
 
   ctx.fillStyle = "#8a8a92";
   ctx.font = "13px 'Segoe UI', sans-serif";
-  ctx.fillText("Chain kills within 5 s to build combo power", W / 2, H / 2 + 80);
+  ctx.fillText("Chain kills within 5 s to build combo power", W / 2, H / 2 + 98);
 
   if (best.wave > 0) {
     ctx.fillStyle = "#8a8a92";
     ctx.font = "13px 'Segoe UI', sans-serif";
-    ctx.fillText(`Best: wave ${best.wave}  ·  kills ${best.kills}`, W / 2, H / 2 + 104);
+    ctx.fillText(`Best: wave ${best.wave}  ·  kills ${best.kills}`, W / 2, H / 2 + 122);
   }
 
   ctx.fillStyle = "#e0b34a";
   ctx.font = "bold 16px 'Segoe UI', sans-serif";
-  ctx.fillText("Click or press any key to begin", W / 2, H / 2 + 142);
+  ctx.fillText("Click or press any key to begin", W / 2, H / 2 + 160);
   ctx.textAlign = "left";
 }
 
@@ -1137,6 +1479,7 @@ function frame(now) {
   bodies.sort((a, b) => a.y - b.y);
   for (const b of bodies) b.draw();
   drawProjectiles();
+  drawSpellFx();
   drawFx();
   ctx.restore();
 

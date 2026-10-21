@@ -6,9 +6,9 @@ two disagree about current behaviour, `SPECS.md` is authoritative.
 
 | | |
 |---|---|
-| **Status** | **M0 and M0.1 implemented (git deferred by D9)**. Decisions **D1, D4, D7, D8 signed off**; **D2 and D9 postponed**; D3 and D5–D6 open |
+| **Status** | **M0, M0.1 and M0.2 implemented (git deferred by D9)**. Decisions **D1, D2, D4, D7, D8, D10 signed off**; **D9 postponed**; D3 and D5–D6 open |
 | **Last updated** | 2026-10-21 |
-| **Baseline** | Playable vertical slice: movement, melee, fireball, kill-chain combo, 3 enemy types, waves, XP/levels, permadeath run restart, HUD, pause (§1–§12 of `SPECS.md`) |
+| **Baseline** | Playable vertical slice: movement, melee, four selectable active skills (Fireball, Blink, Frost Nova, Chain Lightning) on a single right-click slot, kill-chain combo, 3 enemy types, waves, XP/levels, permadeath run restart, HUD, pause (§1–§13 of `SPECS.md`) |
 
 ---
 
@@ -31,6 +31,7 @@ two disagree about current behaviour, `SPECS.md` is authoritative.
 |---|---|---|---|---|
 | M0 | Foundations & run loop | done (git deferred) | S | — |
 | M0.1 | Combo meter | done | S | M0 |
+| M0.2 | Active skills & loadout | done | M | M0 |
 | M1 | Loot & equipment v1 | planned | L | M0 |
 | M2 | Build choices | planned | M | M1 |
 | M3a | Elites & bosses | planned | M | M1 |
@@ -124,6 +125,7 @@ run had no beginning and no record, so it did not feel like a run.
 7. **Docs now, version control later (D9).** Add a short `README.md` that explains how
    to play and links `SPECS.md` and this file. **Git initialisation is postponed**
    (D9); no `.gitignore` or commits until that decision is revisited.
+
 **Technical notes**
 
 - `elapsed` already resets in `restartGame()`, so it doubles as the run clock; do not
@@ -178,6 +180,63 @@ run had no beginning and no record, so it did not feel like a run.
 - [x] Meter appears on the right while active and is hidden at 0.
 - [x] Death and restart reset the combo.
 - [x] Headless browser test passes (thresholds, damage, timeout, reset, HUD, zero errors).
+
+---
+
+### M0.2 — Active skills & loadout (shipped 2026-10-21)
+
+**Goal:** give right-click a real choice and add movement, control and pack-clear
+options, without adding a resource system or more than one new key family.
+
+**Why now:** the fireball was the only active and it owned right-click, which left the
+mouse with a single verb. A one-slot loadout makes the choice explicit while keeping
+input readable: one cast button, four options.
+
+**Features**
+
+1. **Skill table & single active slot.** `SKILLS` / `SKILL_ORDER` define four actives;
+   `selectedSkill` holds exactly one. Selection via `1`–`4` or a left click on a HUD
+   slot; the selection persists across runs. Right-click (and only right-click) casts
+   the selected skill.
+2. **Blink.** 140 px cursor-directed teleport, 0.15 s invulnerability, 5 s cooldown, no
+   damage. Clamps to the world; no collision, so it can pass through enemies.
+3. **Frost Nova.** 140 px radius burst for `20 + 2/level`, applies a 40% move-speed slow
+   for 2.5 s and a pale-blue slow ring. 8 s cooldown.
+4. **Chain Lightning.** Instant chain: nearest enemy to the cursor within 240 px, then
+   jumps to the nearest un-hit enemy within 180 px, max 5 targets, ×0.85 damage per jump.
+   7 s cooldown. A cast with no target shows `NO TARGET` and does not start the cooldown.
+5. **Per-skill cooldowns.** `player.skillCd` keyed by skill, all ticked in `updatePlayer`
+   and zeroed in `restartGame()`. Casting is refused while the selected skill is cooling
+   down (no buffering).
+6. **Loadout HUD.** Four 44 px slots along the bottom-left with icons, `1`–`4` badges,
+   radial cooldown sweeps + seconds, and a gold double ring on the selected slot.
+
+**Technical notes**
+
+- All three new skills route damage through `damageEnemy()`, so kills, combo, XP and
+  future loot keep using the single funnel.
+- Nova and Chain use the combo multiplier; Blink does not deal damage and ignores it.
+- Frost slow is a per-enemy `slow` timer that scales movement only; it ticks inside the
+  normal enemy update (so hit-stun pauses movement but not the slow countdown).
+- Blink grants `player.invuln`; `hurtPlayer()` refuses damage while it is positive.
+  I-frames do not protect against the summary — death still ends the run.
+- Spell visuals live in a separate `spellFx` array (Blink trail, Nova ring, lightning
+  links) drawn between projectiles and particles.
+- Combo copy was widened to “melee and skill damage” since Nova and Chain now scale too.
+
+**Acceptance criteria**
+
+- [x] `1`–`4` and slot clicks select each skill; the selected slot is visually distinct.
+- [x] Right-click casts only the selected skill and respects that skill's cooldown.
+- [x] Blink moves exactly 140 px toward the cursor, clamps at the world edge, and blocks
+      damage for its i-frame window.
+- [x] Frost Nova damages and slows every enemy in radius, and the slow visibly slows
+      movement.
+- [x] Chain Lightning hits exactly 5 targets with per-jump falloff and leaves the sixth
+      untouched; a no-target cast does not consume the cooldown.
+- [x] Restart clears all cooldowns; selection survives restart.
+- [x] Headless browser test passes (selection, blink distance/i-frames, nova damage+slow,
+      chain target count/falloff, cooldown reset, zero page errors).
 
 ---
 
@@ -480,6 +539,7 @@ feels varied. Do not build meta systems on top of an unproven loop.
 | D7 | Should death show a summary before restart? | Show a summary; wait for input | **Decided 2026-10-21** — summary opens immediately and waits for R/Enter/Space/click | M0 |
 | D8 | Item drops after death? | Suppress new drops once the summary opens | **Decided 2026-10-21** — no drops after death | M1 |
 | D9 | Initialise git now, or later? | Initialise now for change history | **Postponed 2026-10-21** — revisit before M1 | M0 |
+| D10 | One selected active skill on right-click, or separate keybinds/sub-slots per skill? | One selected slot on right-click, `1`–`4` (or HUD click) to select | **Decided 2026-10-21** — single active slot; selection persists across runs | M0.2, M2 |
 
 ## 6. Persistence sketch
 
@@ -535,6 +595,7 @@ defaults. Nothing in a save may crash the game if hand-edited or truncated.
 |---|---|
 | v0.3 | M0 — title, death summary, best run (git deferred) |
 | v0.3.1 | M0.1 — kill-chain combo meter |
+| v0.3.2 | M0.2 — active skills & single-slot loadout (Fireball, Blink, Frost Nova, Chain Lightning) |
 | v0.4 | M1 — loot, inventory, stat pipeline |
 | v0.5 | M2 — level-up cards |
 | v0.6 | M3 — elites, bosses, obstacles/LOS |
